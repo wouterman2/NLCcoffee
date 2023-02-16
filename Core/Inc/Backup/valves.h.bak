@@ -1,0 +1,109 @@
+//-----------------------------------------------------------------------------
+//! \file       valves.h
+//! \author     R. Weimar
+//! \brief      Contains defines for the valves module
+//! \details
+//! \Attention
+//-----------------------------------------------------------------------------
+#ifndef INC_VALVES_H_
+#define INC_VALVES_H_
+/* Includes ------------------------------------------------------------------*/
+#include <stdint.h>
+
+//-----------------------------------------------------------------------------
+//! \brief  defines
+#define NROFVALVES			7
+#define S1					1 //QH
+#define S11					2 //QG
+#define S12					3 //QF
+#define S2					4 //QE
+#define S21					5 //QD
+#define S22					6 //QC
+#define S3					7 //QB
+#define VAL_ALL_CIRCUIT_1	0x0f //All valves in Circuit 1 except S3
+#define VAL_ALL_CIRCUIT_2	0x30 //All valves in circuit 2 except S3
+#define VAL_S3				0x40 //Only valve S3
+#define VAL_ALL 			255 //To control all valves on or off
+#define VAL_BUFFER			0 //To control all valves at one time by setting the complete buffer
+#define VAL_SET				1
+#define VAL_RESET			0
+#define S1On()				OutputRegister |= (1<<1)  //QH
+#define S1Off()				OutputRegister &= ~(1<<1) //QH
+#define S11On()				OutputRegister |= (1<<2)  //QG
+#define S11Off()				OutputRegister &= ~(1<<2) //QG
+#define S12On()				OutputRegister |= (1<<3)  //QF
+#define S12Off()				OutputRegister &= ~(1<<3) //QF
+#define S2On()				OutputRegister |= (1<<4)  //QE
+#define S2Off()				OutputRegister &= ~(1<<4) //QE
+#define S21On()				OutputRegister |= (1<<5)  //QD
+#define S21Off()				OutputRegister &= ~(1<<5) //QD
+#define S22On()				OutputRegister |= (1<<6)  //QC
+#define S22Off()				OutputRegister &= ~(1<<6) //QC
+#define S3On()				OutputRegister |= (1<<7)  //QB
+#define S3Off()				OutputRegister &= ~(1<<7) //QB
+#define AllOff()			OutputRegister = 0 //QB
+#define S1_IsOn()			((OutputRegister & (1<<1)) == 1)
+#define S1_IsOff()			((OutputRegister & (1<<1)) == 0)
+#define S11_IsOn()			((OutputRegister & (1<<2)) == 1)
+#define S11_IsOff()			((OutputRegister & (1<<2)) == 0)
+#define S12_IsOn()			((OutputRegister & (1<<3)) == 1)
+#define S12_IsOff()			((OutputRegister & (1<<3)) == 0)
+#define S2_IsOn()			((OutputRegister & (1<<4)) == 1)
+#define S2_IsOff()			((OutputRegister & (1<<4)) == 0)
+#define S21_IsOn()			((OutputRegister & (1<<5)) == 1)
+#define S21_IsOff()			((OutputRegister & (1<<5)) == 0)
+#define S22_IsOn()			((OutputRegister & (1<<6)) == 1)
+#define S22_IsOff()			((OutputRegister & (1<<6)) == 0)
+#define S3_IsOn()			((OutputRegister & (1<<7)) == 1)
+#define S3_IsOff()			((OutputRegister & (1<<7)) == 0)
+
+#define SER595_H()			HAL_GPIO_WritePin(SER595_GPIO_Port, SER595_Pin,GPIO_PIN_SET)
+#define SER595_L()			HAL_GPIO_WritePin(SER595_GPIO_Port, SER595_Pin,GPIO_PIN_RESET)
+#define EN595_H()			HAL_GPIO_WritePin(EN595_GPIO_Port, EN595_Pin,GPIO_PIN_SET)
+#define EN595_L()			HAL_GPIO_WritePin(EN595_GPIO_Port, EN595_Pin,GPIO_PIN_RESET)
+#define RCLK595_H()			HAL_GPIO_WritePin(RCLK595_GPIO_Port, RCLK595_Pin,GPIO_PIN_SET)
+#define RCLK595_L()			HAL_GPIO_WritePin(RCLK595_GPIO_Port, RCLK595_Pin,GPIO_PIN_RESET)
+#define SRCLK595_H()		HAL_GPIO_WritePin(SRCLK595_GPIO_Port, SRCLK595_Pin,GPIO_PIN_SET)
+#define SRCLK595_L()		HAL_GPIO_WritePin(SRCLK595_GPIO_Port, SRCLK595_Pin,GPIO_PIN_RESET)
+#define SRCLK595_TOGGLE()	HAL_GPIO_TogglePin(SRCLK595_GPIO_Port, SRCLK595_Pin)
+
+#define	VALVENONENONE		0x00
+#define	VALVENONEMILK		0x20
+#define	VALVENONEWATER		0x50
+#define	VALVECOFFEENONE		0x0B
+#define	VALVECOFFEEMILK		0x2B
+#define	VALVEMILKNONE		0x04
+#define	VALVEMILKMILK		0x24
+#define	VALVEMILKWATER		0x54
+#define	VALVEWATERNONE		0x42
+#define	VALVEWATERMILK		0x62
+#define	VALVEWATERWATER		0x52
+
+#define CIRCUIT_1_2				0
+#define CIRCUIT_1				1
+#define CIRCUIT_2				2
+#define CIRCUIT_1_OFF			0
+#define CIRCUIT_1_COFFEE		1
+#define CIRCUIT_1_MILK			2
+#define CIRCUIT_1_WATER			3
+#define CIRCUIT_2_OFF			4
+#define CIRCUIT_2_MILK			5
+#define CIRCUIT_2_WATER			6
+#define CIRCUIT_1_2_OFF			7
+#define CIRCUIT_1_2_MILK		8
+#define CIRCUIT_1_2_WATER		9
+
+
+
+//-----------------------------------------------------------------------------
+//! \brief  Public variables
+extern uint8_t OutputRegister;
+//-----------------------------------------------------------------------------
+//! \brief  Public functions
+extern uint8_t VAL_GetStatus (void);
+extern void VAL_Init (void);
+extern void VAL_Handle(void);
+extern void VAL_Set (uint8_t newValve, uint8_t newStatus);
+extern void VAL_SetCircuit (uint8_t newCircuitSetting, uint8_t newIncludeS3);
+
+#endif /* INC_VALVES_H_ */

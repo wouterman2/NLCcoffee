@@ -1,0 +1,148 @@
+//-----------------------------------------------------------------------------
+//! \file       analog.c
+//! \author     R. Weimar. RMB Holland bv
+//! \brief      Contains routines for the analog measurement
+//! \details
+//! \Attention
+//! \Created on: Apr 27, 2022
+//-----------------------------------------------------------------------------
+#include "analog.h"
+#include "adc.h"
+#include "work.h"
+#include "watertank.h"
+#include <math.h>
+//-----------------------------------------------------------------------------
+//! \Global ADC calibration value
+uint16_t vrefint_cal;                        // VREFINT calibration value
+//! \Global ADC container
+uint16_t ADC_Converted_Values[NROFANALOGSENSORS];
+uint16_t ADC_Voltage_Values[NROFANALOGSENSORS-1];
+
+//-----------------------------------------------------------------------------
+//! \brief      Initializes the analog module
+//! \details    Starts DMA and assign values
+//! \param      None
+void ANA_Init(void)
+{
+	vrefint_cal= *((uint16_t*)VREFINT_CAL_ADDR_CMSIS); // read VREFINT_CAL_ADDR memory location
+	HAL_ADC_Start_DMA(&hadc,(uint32_t*) &ADC_Converted_Values,NROFANALOGSENSORS);
+}
+//-----------------------------------------------------------------------------
+//! \brief      Returns the value of the selected sensor
+//! \details    Converts the analog value to a temperature or pressure
+//! \param[in]  enuSensor newSensor
+//! 			ADC_PS3 = Ambient pressure,
+//!				ADC_LS1 = Water tank level sensor
+//!				ADC_PS2 = Steam pressure sensor
+//!				ADC_PS1 = Water pressure sensor
+//!				ADC_NTC3 = Temperature brewer head sensor
+//!				ADC_NTC4 = Temperature steam/milk sensor
+//!				ADC_NTC1 = Temperature FTH 1
+//!				ADC_NTC2 = Temperature FTH 2
+//!				ADC_VINTREF = Internal reference voltage
+//! \param[out] float value
+uint64_t MCUVoltage;
+float ANA_GetSensorValue(enuSensor newSensor)
+{
+	float ADCValue = (float) (ADC_Converted_Values[(uint8_t) newSensor]);
+	float ReturnValue = 0;
+	float fTemp;
+#if (ADC_NTC3_DIFFERENT==1)
+	float fTemp1, fTemp2;
+	//Brewer head NTC parameters
+	const float NTCB = 3984;
+#endif
+	float fLog;
+	float fDenum;
+	const float SerialRes = 10000;
+	//const float ADC_MAX = 4095; //3952
+	//FTH NTC parameters
+	const float A = 7.91378234279882E-4f;
+	const float B = 2.26539298535776E-4f;
+	const float D = 8.80540116411882E-8f;
+
+
+
+	uint64_t Temp;
+	MCUVoltage = (3000 * vrefint_cal) / ADC_Converted_Values[NROFANALOGSENSORS - 1];
+	if (MCUVoltage < 3000)
+	{
+		MCUVoltage = 0;
+	}
+	for (uint8_t i = 0; i< NROFANALOGSENSORS-1; i++)
+	{
+		Temp = (uint64_t)3000 * (uint64_t)vrefint_cal * (uint64_t)ADC_Converted_Values[i];
+		Temp = Temp / (uint64_t) ADC_Converted_Values[NROFANALOGSENSORS - 1];
+		Temp = Temp / 4095;
+		ADC_Voltage_Values[i] = (uint16_t) Temp;
+	}
+	switch (newSensor)
+	{
+		case ADC_SW3:
+		case ADC_SW4:
+		case ADC_SW5:
+		{
+			break;
+			ReturnValue = ADC_Voltage_Values[newSensor];
+		}
+
+		case ADC_PS1:
+		case ADC_PS2:
+		{
+			ReturnValue = (ADC_Voltage_Values[newSensor] - 500) * 4;
+			break;
+		}
+		case ADC_PS3: //Ambient
+		{
+			break;
+		}
+		case ADC_LS1: //Water tank level
+		{
+			if (LS1_VOLTAGE <= LS1_VOLTAGE_EMPTY)
+				ReturnValue = 0;
+			else
+				ReturnValue  = ((float)LS1_VOLTAGE - (float)LS1_VOLTAGE_EMPTY) * (float)WAT.Area /10000.0f;
+			break;
+		}
+		case ADC_NTC1: //FTH 1 temperature
+		case ADC_NTC2: //FTH 2 temperature
+#if (ADC_NTC3_DIFFERENT==0)
+		case ADC_NTC3: //FTH 3 temperature	//Temporary for testing NTC in Holland. Later see below case ADC_NTC3
+#endif
+		case ADC_NTC4: //Milk temperature
+		{
+			if (ADCValue > NTC1_2_DISCONNECTED_VALUE)
+				ReturnValue = DISCONNECTED;
+			else if (ADCValue < NTC1_2_SHORTED_VALUE)
+				ReturnValue = SHORTED;
+			else //NTC values in range. Calculate temperature
+			{
+				fTemp = ADC_Voltage_Values[newSensor] * SerialRes / (3300 - ADC_Voltage_Values[newSensor]);
+				fLog = (float)(log(fTemp));
+				fDenum = (A + (B *( fLog)) + (D * (pow(fLog, 3))));
+				ReturnValue = ((1.0f/(fDenum)) - 273.15) * 10; // x 0.1 °C
+			}
+			break;
+		}
+#if (ADC_NTC3_DIFFERENT != 0)
+		case ADC_NTC3:
+		{
+			if (ADCValue > NTC3_DISCONNECTED_VALUE) ReturnValue = DISCONNECTED;
+			else if (ADCValue < NTC3_SHORTED_VALUE) ReturnValue = SHORTED;
+			else //NTC value in range. Calculate temperature
+			{
+				fTemp = ADC_Voltage_Values[newSensor] * SerialRes / (MCUVoltage - ADC_Voltage_Values[newSensor]);
+				fLog = log(fTemp/SerialRes);
+				fTemp1 = (fLog/NTCB);
+				fTemp2 = 1/298.15;
+				ReturnValue = ((1/(fTemp1+fTemp2)) - 273.15) * 10; //x 0.1 °C
+			}
+			break;
+		}
+#endif
+
+		default:
+			break;
+	}
+	return ReturnValue;
+}

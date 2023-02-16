@@ -1,0 +1,52 @@
+//-----------------------------------------------------------------------------
+//! \file       analog.h
+//! \author     R. Weimar
+//! \brief      Contains routines for analog measurement
+//! \details
+//! \Attention
+//-----------------------------------------------------------------------------
+
+
+#ifndef INC_ANALOG_H_
+#define INC_ANALOG_H_
+/* Includes ------------------------------------------------------------------*/
+#include <stdint.h>
+//-----------------------------------------------------------------------------
+//! \brief defines
+#define NTC1_2_DISCONNECTED_VALUE	3900
+#define NTC1_2_SHORTED_VALUE		100
+#define NTC3_DISCONNECTED_VALUE		3900
+#define NTC3_SHORTED_VALUE			100
+#define LS1_VOLTAGE_ZERO_BAR		500.0f
+#define LS1_VOLTAGE_OFFSET			200.0f
+#define LS1_VOLTAGE					(ADC_Voltage_Values[ADC_LS1] - LS1_VOLTAGE_ZERO_BAR)
+#define DISCONNECTED				-273.15
+#define SHORTED						1200.15
+#define ADC_NTC3_DIFFERENT			0 //0: H3 NTC is same as Ferro NTC, 1: H3 NTC is different
+
+typedef enum
+{
+	ADC_PS3 = 0, //Ambient pressure
+	ADC_LS1 = 1, //Water tank level sensor
+	ADC_PS2 = 2, //Steam pressure sensor
+	ADC_PS1 = 3, //Water pressure sensor
+	ADC_NTC3 = 4,//Temperature brewer head sensor
+	ADC_NTC4 = 5,//Temperature steam/milk sensor
+	ADC_NTC1 = 6,//Temperature FTH 1
+	ADC_NTC2 = 7,//Temperature FTH 2
+	ADC_SW5 = 8,//HAL # 2
+	ADC_SW3 = 9,//HAL # 0
+	ADC_SW4 = 10,//HAL # 1
+} enuSensor;
+//! \Brief public variables
+extern uint16_t vrefint_cal;
+//-----------------------------------------------------------------------------
+//! \brief private defines
+#define NROFANALOGSENSORS 12 //Added SW3-SW4-SW5 and VRefInt
+
+extern uint16_t ADC_Voltage_Values[NROFANALOGSENSORS-1];
+//-----------------------------------------------------------------------------
+//! \brief Public functions
+extern void ANA_Init(void);
+extern float ANA_GetSensorValue(enuSensor newSensor);
+#endif /* INC_ANALOG_H_ */

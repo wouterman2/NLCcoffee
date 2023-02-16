@@ -1,0 +1,458 @@
+//-----------------------------------------------------------------------------
+//! \file       serial.c
+//! \author     R. Weimar. RMB Holland bv
+//! \brief      Contains routines for the serial module
+//! \details
+//! \Attention
+//! \Created on: Apr 27, 2022
+//!  The software is equipped to handle UART:
+//!  - UART2 (115200 baud)
+//!
+//!  The software is a start of the UART communication between coffee machine and Linux
+//!  It will simply return a Success return message unless the CRC is wrong. Then it will send a CRC Error message
+//!  The protocol for the coffee machine is written below:
+//!
+//!  The protocol for the coffee machine is written in 80482201_UART protocol V1.x.xlsm
+//!
+//-----------------------------------------------------------------------------
+
+#include "serial.h"
+#include "usart.h"
+#include "crc.h"
+#include "utils.h"
+#include "recipe.h"
+#include "work.h"
+#include "led.h"
+#include "filter.h"
+#include "steamwand.h"
+#include "watertank.h"
+#include "driptray.h"
+#include "ritualbutton.h"
+#include "AM2302.h"
+#include "analog.h"
+#include "pumps.h"
+#include "airpump.h"
+#include "valves.h"
+#include "heaters.h"
+#include "steamwand.h"
+#include <stdint.h>
+#include <string.h>
+
+//! \CRC value calculated
+uint8_t CalculatedCRC;
+//! \UART message structure
+stcUARTMessage Message;
+//! \UART handle
+uint8_t UartReturn;
+//! \UART busy flag
+uint8_t SER_Busy;
+
+//-----------------------------------------------------------------------------
+//! \brief      Initiates the serial unit
+//! \details    Sets up Message buffer. Starts UART
+//! \param      None
+void SER_Init (void)
+{
+	Message.RxBuffer ='\000';
+	HAL_UART_Receive_DMA(&huart3, &Message.RxBuffer, 1);
+	//__HAL_UART_ENABLE_IT(&huart3,UART_IT_IDLE);
+	HAL_UART_Receive_DMA(&huart2, &Message.RxBuffer, 1);
+}
+
+//-----------------------------------------------------------------------------
+//! \brief      Sets the status of the return message of actions
+//! \details    the work module confirms accepting or timing out.
+//! \param[in]  uint8_t newStatus	Status of the return message
+void SER_SetStatus (uint8_t newStatus)
+{
+	SER_SendReturnMessage (10, newStatus);
+}
+
+//! \brief      Sends a return message to the corresponding UART
+//! \details    Calculates CRC, fills the buffer and sends the buffer
+//! \param[in]  uint8_t newLength	Length of the message
+//! \param[in]  uint8_t newStatus	Status of the return message
+void SER_SendReturnMessage (uint8_t newLength, uint8_t newStatus)
+{
+	uint8_t newCRC;
+	//Fill length in data buffer
+	Message.RxData[2]=UTL_Dec2Asc(newLength / 16);
+	Message.RxData[3]=UTL_Dec2Asc(newLength % 16);
+	//Fill status in data buffer
+	if (newLength > 8)
+	{
+		Message.RxData[8]=UTL_Dec2Asc(newStatus / 16);
+		Message.RxData[9]=UTL_Dec2Asc(newStatus % 16);
+	}
+	//Calculate CRC and store it in data buffer
+	newCRC = CalculateCRC8(Message.RxData, newLength);
+	Message.RxData[6]= UTL_Dec2Asc(newCRC / 16);
+	Message.RxData[7]= UTL_Dec2Asc(newCRC % 16);
+	//Send data
+	if (UartReturn==2)
+		HAL_UART_Transmit(&huart2, Message.RxData,newLength,100);
+	else if (UartReturn==3)
+		HAL_UART_Transmit(&huart3, Message.RxData,newLength,100);
+	//Empty data buffer
+	Message.Length = 0;
+	Message.MType = 0;
+	Message.Counter = 0;
+	Message.CRCValue = 0;
+	Message.RxBuffer = 0;
+	memset(Message.RxData, 0, sizeof(Message.RxData));
+	SER_Busy = 0;
+}
+
+//-----------------------------------------------------------------------------
+//! \brief      Converts the byte from the recipe to an integer
+//! \details    Converts the hex bytes to an integer, returns the integer
+//! \param[in]  uint8_t newUart			Uart number
+//! \param[in]  uint8_t newStartByte	Start byte of the hex string
+//! \param[in]  uint8_t newLength		Length of the hex string [2 or 4 bytes]
+//! \param[out]	uint16_t ReturnValue
+uint16_t SER_GetValue (uint8_t newStartByte, uint8_t newLength)
+{
+	uint16_t returnValue = 0;
+	if (newLength == 1)
+		returnValue = UTL_Asc2Dec(Message.RxData[newStartByte]);
+	else if (newLength == 2)
+		returnValue = UTL_Asc2Dec(Message.RxData[newStartByte]) * 16 + UTL_Asc2Dec(Message.RxData[newStartByte + 1]);
+	else if (newLength == 4)//4 bytes
+		returnValue = UTL_Asc2Dec(Message.RxData[newStartByte]) * 4096 + UTL_Asc2Dec(Message.RxData[newStartByte + 1]) * 256 + UTL_Asc2Dec(Message.RxData[newStartByte + 2]) * 16 + UTL_Asc2Dec(Message.RxData[newStartByte + 3]);
+	return returnValue;
+}
+
+void SER_FillData (uint8_t newPosition, uint32_t newValue)
+{
+	Message.RxData[newPosition] = UTL_Dec2Asc(newValue / 0x1000);
+	newValue -= (newValue / 0x1000) * 0x1000;
+	Message.RxData[newPosition + 1] = UTL_Dec2Asc(newValue / 0x100);
+	newValue -= (newValue / 0x100) * 0x100;
+	Message.RxData[newPosition + 2] = UTL_Dec2Asc(newValue / 0x10);
+	newValue -= (newValue / 0x10) * 0x10;
+	Message.RxData[newPosition + 3] = UTL_Dec2Asc(newValue);
+}
+
+uint8_t SER_FillBuffer (uint8_t newPosition, uint16_t MType)
+{
+	uint8_t Counter = 0;
+	uint8_t ReturnValue = 0;
+
+	if ((MType == MTypeGetProcessData)||(MType == MTypeGetAllData))
+	{
+		SER_FillData(newPosition, (uint32_t) REC_GetNrOfBlocks(RECIPE1));
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) REC_GetNrOfBlocks(RECIPE2));
+		SER_FillData(newPosition+(Counter+=4), 0);//No more recipe 3. Was Water
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WAT_GetVolume());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) FIL_GetStatus());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WAN_GetStatus());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) DRP_GetStatus());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WRK_GetMainStatus());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WRK_GetSubStatus());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) AM_GetHumidity());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) AM_GetTemperature());
+	}
+	if ((MType == MTypeGetPhysicalData)||(MType == MTypeGetAllData))
+	{
+		if (Counter == 0)
+			SER_FillData(newPosition, (uint32_t) REC_GetCurrentBlock(RECIPE1));
+		else
+			SER_FillData(newPosition+(Counter+=4), (uint32_t) REC_GetCurrentBlock(RECIPE1));
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) REC_GetCurrentBlock(RECIPE2));
+		SER_FillData(newPosition+(Counter+=4), 0);// No more recipe 3. Was water
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) HEA_GetHeaterTemperature(H1)); //FTH1 temperature
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) HEA_GetHeaterTemperature(H2)); //FTH2 temperature
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) HEA_GetHeaterTemperature(H3)); //BrewerHead temperature
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WAN_GetTemperature()); //Milk temperature
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetFlow(0)); //Flow pump 1
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetFlow(1)); //Flow pump 2
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) AIR_GetPercentage()); //Flow pump 3 (In fact percentage. Has no flow meter for the air)
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetPressure(0)); //PS1 pressure
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetPressure(1)); //PS2 pressure
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetVolume(0)); //Volume pump 1
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) PUM_GetVolume(1)); //Volume pump 2
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) VAL_GetStatus()); //Valves bit array
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) BTN_GetStatus(BTN_COFFEE));
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) BTN_GetDirection(BTN_COFFEE));
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) BTN_GetStatus(BTN_MILK));
+	}
+	if ((MType == MTypeGetDeviceData)||(MType == MTypeGetAllData))
+	{
+		if (Counter == 0)
+			SER_FillData(newPosition, (uint32_t) SERIALNUMBER >> 16);
+		else
+			SER_FillData(newPosition+(Counter+=4), (uint32_t) SERIALNUMBER >> 16);
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) (SERIALNUMBER & 0xffff));
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WRK_GetHardwareVersion());
+		SER_FillData(newPosition+(Counter+=4), (uint32_t) WRK_GetSoftwareVersion());
+	}
+	ReturnValue = (Counter+=4);
+	return ReturnValue;
+}
+
+//-----------------------------------------------------------------------------
+//! \brief      Handles the serial actions
+//! \details    Process the message
+//! \params     None
+void SER_Handle (void)
+{
+	SER_ProcessMessage();
+	if(HAL_UART_GetError(&huart2))
+	{
+		HAL_UART_DMAStop(&huart2);
+		MX_USART2_UART_Init();
+		HAL_UART_Receive_DMA(&huart2, &Message.RxBuffer, 1);
+	}
+	if(HAL_UART_GetError(&huart3))
+	{
+		HAL_UART_DMAStop(&huart3);
+		MX_USART2_UART_Init();
+		HAL_UART_Receive_DMA(&huart3, &Message.RxBuffer, 1);
+	}
+}
+
+//-----------------------------------------------------------------------------
+//! \brief      Processes the message
+//! \details    Checks if the complete message is received and if so processes it
+//! \param      None
+void SER_ProcessMessage (void)
+{
+	uint8_t NrOfBlocks;
+	uint8_t CurrentBlock;
+	uint8_t DataLength;
+
+	if	((Message.Counter > 0) &&(Message.Counter == Message.Length))  //Message received completely
+	{
+		//Check CRC
+		WRK_ResetAction(); //Cancel the current action in case this is pending as the return message is scrambled.
+		CalculatedCRC = CalculateCRC8(Message.RxData, Message.Length);
+		if (CalculatedCRC != Message.CRCValue) //Invalid CRC.
+		{
+			SER_SendReturnMessage (10,MStatCRCError);
+		}
+		else if (Message.UARTVersion != UARTVERSION)
+		{
+			SER_SendReturnMessage (10,MStatUARTVersionError);
+		}
+		else
+		{
+			//Evaluate incoming message
+			if ((Message.MType <= MTypeMaxRecipe) && ((Message.MType & 0xF) >= 1)) //Message is a recipe
+			{
+				if (Message.MType <= MTypeLastRecipe) //Message is a valid recipe
+				{
+					SER_Busy = 1;
+					NrOfBlocks = SER_GetValue (8,2);
+					gRecipe[Message.MType-1].Blocks = NrOfBlocks;
+					CurrentBlock = SER_GetValue (10,2);
+					if (CurrentBlock < NrOfBlocks)
+					{
+						if (CurrentBlock == 0) memset(gRecipe[Message.MType-1].RecipeBlocks, 0, sizeof(gRecipe[Message.MType-1].RecipeBlocks)); //Clear the current coffee recipe
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].H1SetTemp = SER_GetValue (12,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].H2SetTemp = SER_GetValue (14,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].H3SetTemp = SER_GetValue (16,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].MFSetTemp = SER_GetValue (18,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P1Flow = SER_GetValue (20,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P2Flow = SER_GetValue (22,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P3Flow = SER_GetValue (24,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P1Pressure = SER_GetValue (26,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P2Pressure = SER_GetValue (28,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P1Volume = SER_GetValue (30,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].P2Volume = SER_GetValue (34,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].Valves  = SER_GetValue (38,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].Piston = SER_GetValue (40,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].Time = SER_GetValue (42,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].ControlType1 = SER_GetValue (46,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].ControlType2 = SER_GetValue (48,2);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].EndConditions1 = SER_GetValue (50,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].EndConditions2 = SER_GetValue (54,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].EndConditions3 = SER_GetValue (58,4);
+						gRecipe[Message.MType-1].RecipeBlocks[CurrentBlock].EndConditions4 = SER_GetValue (62,4);
+						if (CurrentBlock == NrOfBlocks - 1)
+							gRecipe[Message.MType-1].Valid = 1;
+						else
+							gRecipe[Message.MType-1].Valid = 0;
+
+						SER_SendReturnMessage (12,MStatSuccess);
+					}
+					else
+					{
+						SER_SendReturnMessage (12,MStatBlockNrError);
+					}
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+			}
+			else if ((Message.MType <= MTypeMaxRecipeAction) && ((Message.MType & 0xF) >= 1)) //Message is a recipe action
+			{
+				if (Message.MType <= MTypeLastRecipeAction)
+				{
+					Message.Counter = 0;
+					WRK_SetAction (Message.MType);
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+				//Work module initiates the return message by calling SER_SetStatus
+				//The Linux system should wait for the return message before sending a new message
+				//If another message is received before SER_SetStatus is called, the current action is canceled.
+			}
+			else if ((Message.MType <= MTypeMaxPartition) && ((Message.MType & 0xF) >= 1))//Message is a partition command
+			{
+				if (Message.MType <= MTypeLastPartition)
+				{
+					SER_SendReturnMessage (12,MStatSuccess);
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+			}
+			else if ((Message.MType <= MTypeMaxGetData) && ((Message.MType & 0xF) >= 1))//Message is a request info command
+			{
+				if (Message.MType <= MTypeLastGetData)
+				{
+					if (Message.MType == MTypeGetProcessData)
+					{
+						SER_Busy = 1;
+						DataLength = SER_FillBuffer(10, Message.MType);
+						SER_SendReturnMessage (DataLength + 10,MStatSuccess);
+					}
+					else if (Message.MType == MTypeGetPhysicalData)
+					{
+						SER_Busy = 1;
+						DataLength = SER_FillBuffer(10, Message.MType);
+						SER_SendReturnMessage (DataLength + 10,MStatSuccess);
+					}
+					else if (Message.MType == MTypeGetDeviceData)
+					{
+						SER_Busy = 1;
+						DataLength = SER_FillBuffer(10, Message.MType);
+						SER_SendReturnMessage (DataLength + 10,MStatSuccess);
+					}
+					else if (Message.MType == MTypeGetAllData)
+					{
+						SER_Busy = 1;
+						DataLength = SER_FillBuffer(10, Message.MType);
+						SER_SendReturnMessage (DataLength + 10,MStatSuccess);
+						/*DataLength = SER_FillBuffer(10, MTypeGetProcessData);
+						DataLength += SER_FillBuffer(DataLength + 10, MTypeGetPhysicalData);
+						DataLength += SER_FillBuffer(DataLength + 10, MTypeGetDeviceData);
+						SER_SendReturnMessage (DataLength + 10,MStatSuccess);
+						*/
+					}
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+			}
+			else if ((Message.MType <= MTypeMaxSetting) && ((Message.MType & 0xF) >= 1))//Message is a setting
+			{
+				if (Message.MType <= MTypeLastSetting)
+				{
+					SER_Busy = 1;
+					LED_Set(SER_GetValue (12,1), SER_GetValue (13,1), SER_GetValue (14,2), SER_GetValue (16,2), SER_GetValue (18,2), SER_GetValue (20,2), SER_GetValue (22,4), SER_GetValue (26,4), SER_GetValue (30,2));
+					SER_SendReturnMessage (12,MStatSuccess);
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+			}
+			else if ((Message.MType <= MTypeMaxMachineAction) && ((Message.MType & 0xF) >= 1))//Message is a machine action
+			{
+				if (Message.MType <= MTypeLastMachineAction)
+				{
+					Message.Counter = 0;
+					WRK_SetAction (Message.MType);
+				}
+				else
+				{
+					SER_SendReturnMessage (12,MStatUnknownType);
+				}
+				//Work module initiates the return message by calling SER_SetStatus
+				//The Linux system should wait for the return message before sending a new message
+				//If another message is received before SER_SetStatus is called, the current action is canceled.
+			}
+			else //Message type is unknown
+			{
+				SER_SendReturnMessage (12,MStatUnknownType);
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+//! \brief      Handles the UART interrupt from DMA
+//! \details    Resets the buffer counter if 0x1B is received
+//! \details    Checks the length of the message and limits to MDataMax
+//! \details    Fills the rest of the data buffer until the length of the message is received
+//! \param      None
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (SER_Busy) return;
+	uint8_t CurrentValue;
+	if(huart->Instance == USART2)  //Received from debugging interface
+	{
+		UartReturn = 2;
+	}
+	else if(huart->Instance == USART3)  //Received from linux system
+	{
+		UartReturn = 3;
+	}
+
+	CurrentValue = UTL_Asc2Dec(Message.RxBuffer);
+	Message.RxData[Message.Counter] = Message.RxBuffer;
+	if (Message.RxBuffer == 0x2f) //Start byte. Reset Rx counter
+	{
+		Message.Counter = 1;
+	}
+	else if (Message.Counter == 1) //UART protocol
+	{
+		Message.UARTVersion = CurrentValue;
+		Message.Counter = 2;
+	}
+	else if (Message.Counter == 2) //Length MSB received
+	{
+		Message.Length = CurrentValue * 16;
+		Message.Counter = 3;
+	}
+	else if (Message.Counter == 3) //Length LSB received
+	{
+		Message.Length += CurrentValue;
+		if (Message.Length > MLengthMax)
+			Message.Length = MLengthMax; //Prevent buffer overflow
+		Message.Counter = 4;
+	}
+	else if	(Message.Counter == 4) //Message type MSB received
+	{
+		Message.MType = CurrentValue * 16;
+		Message.Counter = 5;
+	}
+	else if	(Message.Counter == 5) //Message type LSB received
+	{
+		Message.MType += CurrentValue;
+		Message.Counter = 6;
+	}
+	else if	(Message.Counter == 6) //CRC MSB received
+	{
+		Message.CRCValue = CurrentValue * 16;
+		Message.Counter = 7;
+	}
+	else if	(Message.Counter == 7) //CRC LSB received
+	{
+		Message.CRCValue += CurrentValue;
+		Message.Counter = 8;
+	}
+	else if	(Message.Counter < Message.Length) //Any byte received
+	{
+		Message.Counter ++;
+	}
+}
+
+
+//---------------- End of file -----------------------
